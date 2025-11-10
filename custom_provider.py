@@ -1,4 +1,4 @@
-# --- ТВОЙ КОД, ПРОКАЧАННЫЙ С ПОМОЩЬЮ SQLITE ---
+# --- ПОЛНЫЙ И ИСПРАВЛЕННЫЙ КОД С ЛОГИРОВАНИЕМ В БД ---
 
 import os
 import requests
@@ -6,8 +6,9 @@ import json
 from flask import Flask, jsonify, request
 from functools import wraps
 from dotenv import load_dotenv
-import sqlite3  # <-- 1. ДОБАВЛЕНО
-import atexit   # <-- 2. ДОБАВЛЕНО
+import sqlite3
+import atexit
+from datetime import datetime
 
 load_dotenv()
 
@@ -17,7 +18,6 @@ db_connection = sqlite3.connect(DB_NAME, check_same_thread=False)
 atexit.register(lambda: db_connection.close())
 
 def setup_database():
-    """Создает таблицу для пользователей, если она еще не существует."""
     cursor = db_connection.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -25,25 +25,34 @@ def setup_database():
             message_count INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_ip TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     db_connection.commit()
-    print("База данных готова к работе.")
-# --- КОНЕЦ БЛОКА БД ---
+    print("База данных (users и messages) готова к работе.")
 
 app = Flask(__name__)
 
-# --- 1. ЦЕНТР УПРАВЛЕНИЯ (без изменений, кроме удаления словаря) ---
+# --- 1. ЦЕНТР УПРАВЛЕНИЯ ---
+
+# <-- ВОТ ЭТИ СТРОЧКИ Я СЛУЧАЙНО УДАЛИЛ. ТЕПЕРЬ ОНИ НА МЕСТЕ -->
 MY_PROVIDER_API_KEY = os.environ.get('MY_PROVIDER_API_KEY')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY') 
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY') 
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+# <-- КОНЕЦ ВОССТАНОВЛЕННОГО БЛОКА -->
 
 MESSAGE_LIMIT = 100
-# user_message_counts = {} # <-- 3. УДАЛЕНО. Больше не нужно, у нас есть БД.
 
 MODEL_MAPPING = {}
 if OPENAI_API_KEY:
     MODEL_MAPPING.update({
-        "umniy-gpt4o-mini": {"provider": "openai", "real_model": "gpt-4o-mini", "provider_url": "https://api.openai.com/v1/chat/completions", "api_key": OPENAI_API_KEY},
         "klassicheskiy-gpt4": {"provider": "openai", "real_model": "gpt-3.5-turbo", "provider_url": "https://api.openai.com/v1/chat/completions", "api_key": OPENAI_API_KEY}
     })
 if GOOGLE_API_KEY:
@@ -55,10 +64,9 @@ if GROQ_API_KEY:
         "besplatniy-compound": { "provider": "openai", "real_model": "groq/compound-mini", "provider_url": "https://api.groq.com/openai/v1/chat/completions", "api_key": GROQ_API_KEY}
     })
 
-# --- 2. СИСТЕМА БЕЗОПАСНОСТИ (без изменений) ---
+
 def require_api_key(f):
     @wraps(f)
-    # ... (код без изменений) ...
     def decorated_function(*args, **kwargs):
         if not MY_PROVIDER_API_KEY: return f(*args, **kwargs)
         auth_header = request.headers.get('Authorization')
@@ -67,50 +75,46 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# --- 3. ГЛАВНЫЕ ЭНДПОИНТЫ (API) ---
 
 @app.route('/v1/models', methods=['GET'])
 @require_api_key
 def list_models():
-    # ... (код без изменений) ...
     model_list = []
     for model_id, details in MODEL_MAPPING.items():
         if details.get("api_key"): model_list.append({"id": model_id, "object": "model", "owned_by": "bratiwka-inc"})
     return jsonify({"object": "list", "data": model_list})
 
+
 @app.route('/v1/chat/completions', methods=['POST'])
 @require_api_key
 def chat_completions():
-    # --- НАЧАЛО ОБНОВЛЕННОГО БЛОКА ПРОВЕРКИ ЛИМИТА ---
     user_ip = request.remote_addr
     cursor = db_connection.cursor()
 
     cursor.execute("SELECT message_count FROM users WHERE ip = ?", (user_ip,))
     result = cursor.fetchone()
-
     if result:
         current_count = result[0]
     else:
-        cursor.execute("INSERT INTO users (ip, message_count) VALUES (?, 0)", (user_ip,))
-        db_connection.commit()
-        current_count = 0
-    
+        cursor.execute("INSERT INTO users (ip, message_count) VALUES (?, 0)", (user_ip,)); db_connection.commit(); current_count = 0
     if current_count >= MESSAGE_LIMIT:
-        print(f"Лимит {MESSAGE_LIMIT} сообщений достигнут для IP: {user_ip}")
-        error_response = {"id": "chatcmpl-limit-exceeded", "object": "chat.completion", "choices": [{"message": {"role": "assistant", "content": f"Извините, вы достигли лимита в {MESSAGE_LIMIT} сообщений. Для продолжения, пожалуйста, приобретите подписку."}}]}
+        error_response = {"id": "chatcmpl-limit-exceeded", "object": "chat.completion", "choices": [{"message": {"role": "assistant", "content": f"Извините, вы достигли лимита в {MESSAGE_LIMIT} сообщений."}}]}
         return jsonify(error_response), 429
-    # --- КОНЕЦ ОБНОВЛЕННОГО БЛОКА ПРОВЕРКИ ЛИМИТА ---
-
+    
     request_data = request.json
+    
+    user_message = request_data.get("messages", [])[-1]
+    if user_message:
+        cursor.execute( "INSERT INTO messages (user_ip, role, content) VALUES (?, ?, ?)", (user_ip, user_message['role'], user_message['content'])); db_connection.commit()
+        print(f"Сообщение от пользователя {user_ip} сохранено в БД.")
+
     model_id = request_data.get("model")
     if model_id not in MODEL_MAPPING or not MODEL_MAPPING[model_id].get("api_key"): return jsonify({"error": f"Model '{model_id}' not configured"}), 404
-    
     target = MODEL_MAPPING[model_id]
     provider = target["provider"]
     
     try:
         response_data = None
-        # ... (здесь вся твоя рабочая логика для openai и google, без изменений) ...
         if provider == "openai":
             headers = {"Authorization": f"Bearer {target['api_key']}", "Content-Type": "application/json"}
             payload = {"model": target["real_model"], "messages": request_data.get("messages", [])}
@@ -128,26 +132,27 @@ def chat_completions():
             content = google_response.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "Error parsing Google response.")
             response_data = {"id": "chatcmpl-google", "object": "chat.completion", "choices": [{"message": {"role": "assistant", "content": content}}]}
 
-        # --- ОБНОВЛЕННЫЙ БЛОК УСПЕХА ---
         if response_data:
-            # Увеличиваем счетчик В БАЗЕ ДАННЫХ
             cursor.execute("UPDATE users SET message_count = ? WHERE ip = ?", (current_count + 1, user_ip))
+            assistant_message = response_data.get("choices", [{}])[0].get("message", {})
+            if assistant_message:
+                cursor.execute( "INSERT INTO messages (user_ip, role, content) VALUES (?, ?, ?)", (user_ip, assistant_message.get('role', 'assistant'), assistant_message.get('content', '')))
             db_connection.commit()
             print(f"Сообщение {current_count + 1}/{MESSAGE_LIMIT} от IP: {user_ip} (записано в БД)")
+            print(f"Ответ ассистента для {user_ip} сохранен в БД.")
             return jsonify(response_data)
         
         return jsonify({"error": "Provider logic failed to return data"}), 500
 
     except requests.exceptions.RequestException as e:
-        # ... (обработка ошибок без изменений) ...
         error_details = str(e)
         if e.response is not None: error_details = e.response.text
         return jsonify({"error": f"Ошибка при обращении к '{provider}': {error_details}"}), 502
 
-# --- 4. ЗАПУСК! ---
+
 if __name__ == '__main__':
-    setup_database() # <-- ВЫЗЫВАЕМ ФУНКЦИЮ ПОДГОТОВКИ БД
-    print("Сервер-посредник с БД SQLite запущен!") # <-- Обновленное сообщение
+    setup_database()
+    print("Сервер-посредник с полным логированием в БД SQLite запущен!")
     print(f"Установлен лимит: {MESSAGE_LIMIT} сообщений на один IP.")
     print("Доступные модели: " + ", ".join(MODEL_MAPPING.keys()))
     app.run(host='0.0.0.0', port=8088)
