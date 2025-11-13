@@ -6,6 +6,8 @@ import requests
 from functools import wraps
 from dotenv import load_dotenv
 
+
+
 from flask import Flask, jsonify, request, g, Response, render_template, redirect, url_for, session, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_admin import Admin, AdminIndexView
@@ -13,6 +15,15 @@ from flask_admin.contrib.sqla import ModelView
 import stripe # <-- импортируем Stripe
 
 load_dotenv()
+
+# --- ДИАГНОСТИЧЕСКИЙ БЛОК ---
+print("="*60)
+print("🕵️  ЗАПУСК ДИАГНОСТИКИ ЗАГРУЗКИ API-КЛЮЧЕЙ...")
+print(f"   OPENAI_API_KEY: {'✅ Загружен' if os.environ.get('OPENAI_API_KEY') else '❌ НЕ НАЙДЕН'}")
+print(f"   GOOGLE_API_KEY: {'✅ Загружен' if os.environ.get('GOOGLE_API_KEY') else '❌ НЕ НАЙДЕН'}")
+print(f"   GROQ_API_KEY:   {'✅ Загружен' if os.environ.get('GROQ_API_KEY') else '❌ НЕ НАЙДЕН'}")
+print("="*60)
+# --- КОНЕЦ ДИАГНОСТИЧЕСКОГО БЛОКА ---
 
 # --- ТАРИФНЫЕ ПЛАНЫ ---
 # Управляем всеми тарифами из одного места
