@@ -5,6 +5,8 @@ import json
 import requests
 from functools import wraps
 from dotenv import load_dotenv
+import time
+import uuid
 
 
 
@@ -60,7 +62,6 @@ class User(db.Model):
     message_limit = db.Column(db.Integer, nullable=False)
     plan = db.Column(db.Text, nullable=False, default='free') # <-- НОВОЕ ПОЛЕ
 
-# ... (остальные модели и классы админки без изменений) ...
 class Message(db.Model):
     __tablename__ = 'messages'
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -70,7 +71,6 @@ class Message(db.Model):
     timestamp = db.Column(db.DateTime, server_default=db.func.now())
 
 class ProtectedAdminIndexView(AdminIndexView):
-    # ... без изменений
     def is_accessible(self):
         auth = request.authorization; admin_user = os.environ.get('ADMIN_USERNAME'); admin_pass = os.environ.get('ADMIN_PASSWORD')
         return auth and auth.username == admin_user and auth.password == admin_pass
@@ -78,13 +78,10 @@ class ProtectedAdminIndexView(AdminIndexView):
         return Response('Login Required', 401, {'WWW-Authenticate': 'Basic realm="Login Required"'})
 
 class UserAdminView(ModelView):
-    # Добавим plan в список для удобства
     column_list = ('username', 'api_key', 'plan', 'message_count', 'message_limit')
     column_editable_list = ('message_limit', 'username', 'plan')
-    # ... остальное без изменений
     def on_model_change(self, form, model, is_created):
         if is_created or form.plan.data != model.plan:
-             # Обновляем лимит, если создаем пользователя или меняем его план
              model.message_limit = TARIFF_PLANS.get(model.plan, {}).get('limit', 100)
         if is_created:
             model.api_key = f"user-{secrets.token_hex(16)}"
@@ -93,8 +90,6 @@ admin = Admin(app, name='Панель Управления', index_view=Protecte
 admin.add_view(UserAdminView(User, db.session, name='Пользователи'))
 
 
-# --- API ЧАСТЬ (без изменений) ---
-# ... (весь твой код API от MODEL_MAPPING до конца chat_completions) ...
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
@@ -119,15 +114,70 @@ def list_models():
 @require_api_key
 def chat_completions():
     user = g.user
-    if user.message_count >= user.message_limit: return jsonify({"error": "Message limit exceeded"}), 429
-    # ... остальная логика без изменений, только используем user.property вместо user_data['property']
+    if user.message_count >= user.message_limit:
+        return jsonify({"error": "Message limit exceeded"}), 429
+
+    # 1. Получаем запрос от интерфейса Open WebUI
+    request_data = request.json
+    model_id = request_data.get('model')
+    messages = request_data.get('messages')
+
+    model_config = MODEL_MAPPING.get(model_id)
+    if not model_config:
+        return jsonify({"error": f"Model '{model_id}' not found"}), 404
+
+    # 2. Отправляем запрос настоящему провайдеру (Google, Groq и т.д.)
+    response_text = ""
+    try:
+        headers = {'Authorization': f'Bearer {model_config["api_key"]}', 'Content-Type': 'application/json'}
+        
+        # Особая обработка для Google, у него свой формат запроса и ответа
+        if model_config["provider"] == "google":
+            google_payload = {"contents": [{"parts": [{"text": msg["content"]}] for msg in messages if msg['role'] == 'user'}]}
+            response = requests.post(model_config["provider_url"], headers=headers, json=google_payload)
+            response.raise_for_status() # Проверяем, не было ли ошибки (типа 4xx или 5xx)
+            response_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        
+        # Стандартная обработка для OpenAI-совместимых API (Groq, сам OpenAI)
+        else: # provider == "openai"
+            payload = {"model": model_config["real_model"], "messages": messages}
+            response = requests.post(model_config["provider_url"], headers=headers, json=payload)
+            response.raise_for_status() # Проверяем на ошибки
+            response_text = response.json()["choices"][0]["message"]["content"]
+
+    except requests.exceptions.RequestException as e:
+        print(f"ОШИБКА: Не удалось связаться с API провайдера: {e}")
+        return jsonify({"error": "Failed to get response from the underlying model provider."}), 500
+    except (KeyError, IndexError) as e:
+        print(f"ОШИБКА: Не удалось разобрать ответ от API провайдера: {e}")
+        return jsonify({"error": "Invalid response format from the underlying model provider."}), 500
+
     user.message_count += 1
-    # ...
     db.session.commit()
-    # ...
+
+    final_response = {
+        "id": f"chatcmpl-{uuid.uuid4()}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_id,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": response_text.strip()
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+    }
+
+    return jsonify(final_response)
 
 
-# --- НОВЫЕ РОУТЫ ДЛЯ ЛИЧНОГО КАБИНЕТА ---
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
