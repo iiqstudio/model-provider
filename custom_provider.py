@@ -114,10 +114,49 @@ def list_models():
 @require_api_key
 def chat_completions():
     user = g.user
-    if user.message_count >= user.message_limit:
-        return jsonify({"error": "Message limit exceeded"}), 429
 
-    # 1. Получаем запрос от интерфейса Open WebUI
+    # --- ИЗМЕНЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
+    if user.message_count >= user.message_limit:
+        # Вместо ошибки 429, мы формируем успешный ответ с предложением обновиться.
+        
+        # Генерируем полную ссылку на страницу профиля пользователя.
+        # _external=True добавляет домен и порт (http://127.0.0.1:8088/profile)
+        payment_url = url_for('profile', _external=True)
+
+        # Создаем текст сообщения с использованием Markdown для красивой ссылки.
+        response_text = (
+            "**Лимит сообщений исчерпан!** 😢\n\n"
+            "На вашем текущем тарифе закончились доступные сообщения. "
+            "Чтобы продолжить общение без ограничений, пожалуйста, обновите ваш тарифный план.\n\n"
+            f"👉 **[Перейти к выбору тарифа]({payment_url})**"
+        )
+        
+        # Собираем JSON-ответ, который выглядит как обычный ответ от модели.
+        # Интерфейс Open WebUI покажет это как сообщение в чате.
+        limit_exceeded_response = {
+            "id": f"chatcmpl-limit-{uuid.uuid4()}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": request.json.get('model', 'system-notification'),
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_text
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0
+            }
+        }
+        return jsonify(limit_exceeded_response)
+    # --- ИЗМЕНЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
+
+
+    # 1. Получаем запрос от интерфейса Open WebUI (этот блок без изменений)
     request_data = request.json
     model_id = request_data.get('model')
     messages = request_data.get('messages')
@@ -126,23 +165,21 @@ def chat_completions():
     if not model_config:
         return jsonify({"error": f"Model '{model_id}' not found"}), 404
 
-    # 2. Отправляем запрос настоящему провайдеру (Google, Groq и т.д.)
+    # 2. Отправляем запрос настоящему провайдеру (этот блок без изменений)
     response_text = ""
     try:
         headers = {'Authorization': f'Bearer {model_config["api_key"]}', 'Content-Type': 'application/json'}
         
-        # Особая обработка для Google, у него свой формат запроса и ответа
         if model_config["provider"] == "google":
             google_payload = {"contents": [{"parts": [{"text": msg["content"]}] for msg in messages if msg['role'] == 'user'}]}
             response = requests.post(model_config["provider_url"], headers=headers, json=google_payload)
-            response.raise_for_status() # Проверяем, не было ли ошибки (типа 4xx или 5xx)
+            response.raise_for_status()
             response_text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
         
-        # Стандартная обработка для OpenAI-совместимых API (Groq, сам OpenAI)
         else: # provider == "openai"
             payload = {"model": model_config["real_model"], "messages": messages}
             response = requests.post(model_config["provider_url"], headers=headers, json=payload)
-            response.raise_for_status() # Проверяем на ошибки
+            response.raise_for_status()
             response_text = response.json()["choices"][0]["message"]["content"]
 
     except requests.exceptions.RequestException as e:
@@ -152,9 +189,11 @@ def chat_completions():
         print(f"ОШИБКА: Не удалось разобрать ответ от API провайдера: {e}")
         return jsonify({"error": "Invalid response format from the underlying model provider."}), 500
 
+    # Увеличиваем счетчик и сохраняем в БД (этот блок без изменений)
     user.message_count += 1
     db.session.commit()
 
+    # Формируем финальный успешный ответ (этот блок без изменений)
     final_response = {
         "id": f"chatcmpl-{uuid.uuid4()}",
         "object": "chat.completion",
@@ -176,7 +215,6 @@ def chat_completions():
     }
 
     return jsonify(final_response)
-
 
 
 @app.route('/login', methods=['GET', 'POST'])
