@@ -216,6 +216,14 @@ def chat_completions():
 
     return jsonify(final_response)
 
+@app.route('/v1/me', methods=['GET'])
+@require_api_key
+def get_current_user_info():
+    user = g.user
+    return jsonify({
+        "username": user.username,
+        "plan": user.plan
+    })
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
