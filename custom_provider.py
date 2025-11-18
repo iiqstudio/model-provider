@@ -237,6 +237,39 @@ def login():
             return render_template('login.html', error="Неверный API ключ")
     return render_template('login.html')
 
+@app.route('/api/internal/create_user', methods=['POST'])
+def create_internal_user():
+    # Это наш "пароль" для связи между двумя сервисами.
+    # Никто со стороны не сможет создавать пользователей.
+    INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
+    auth_header = request.headers.get('Authorization')
+
+    if not auth_header or auth_header != f"Bearer {INTERNAL_API_SECRET}":
+        return jsonify({"error": "Unauthorized internal request"}), 401
+
+    data = request.json
+    email = data.get('email')
+    
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+    
+    # Проверяем, не существует ли уже такой пользователь
+    if User.query.filter_by(username=email).first():
+        return jsonify({"error": "User already exists"}), 409
+
+    # Используем логику из вашего manage_users.py
+    api_key = f"user-{uuid.uuid4().hex}"
+    # Создаем пользователя с email в качестве username и лимитом по умолчанию (например, 200)
+    new_user = User(username=email, api_key=api_key, message_limit=200) 
+    
+    db.session.add(new_user)
+    db.session.commit()
+    
+    print(f"Internal API: Successfully created user {email} with key {api_key}")
+    
+    # Возвращаем созданный ключ - это ОЧЕНЬ ВАЖНО для следующего шага
+    return jsonify({"email": new_user.username, "api_key": new_user.api_key}), 201
+
 @app.route('/profile')
 def profile():
     if 'api_key' not in session:
